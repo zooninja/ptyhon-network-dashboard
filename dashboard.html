@@ -499,6 +499,7 @@
         </div>
     </div>
 
+    <script src="dashboard_auth.js"></script>
     <script>
         let refreshInterval;
         const modal = document.getElementById('detailModal');
@@ -569,7 +570,10 @@
         async function fetchConnections() {
             try {
                 const response = await fetch('/api/connections');
-                allConnections = await response.json();
+                const data = await response.json();
+
+                // Handle new pagination format
+                allConnections = data.connections || data;
 
                 // Apply filters
                 displayConnections();

@@ -10,54 +10,54 @@ Real-time web-based network monitoring dashboard with process management capabil
 
 - Real-time network connection monitoring with 5-second auto-refresh
 - Interactive filtering by connection state and process name
-- Process termination with safety confirmations
+- Process termination with safety confirmations and rate limiting
 - System hostname and IP display for multi-machine monitoring
-- Local and remote access modes
+- **Safe-by-default**: Local-only mode requires no authentication
+- **Token-based authentication**: Required for network-exposed deployments
+- **Critical process protection**: Prevents termination of essential system processes
 - Dark naval theme with smooth animations
 - Cross-platform support (Windows, Linux, macOS)
 
 ## Quick Start
 
-### Local Monitoring (localhost only)
+### Local Mode (Recommended)
 
-**Windows:**
-```batch
-start.bat
-```
-
-**Linux/macOS:**
 ```bash
-./start.sh
-```
-
-**Linux (Debian 12+/Ubuntu 23.04+):**
-```bash
-bash start_venv.sh
+python server.py
 ```
 
 Access at `http://localhost:8081`
 
-### Remote Monitoring (network access)
+- No authentication required
+- Bind to `127.0.0.1` (localhost only)
+- Process termination enabled by default
 
-For remote access from other machines or cloud VMs, edit `config.py`:
+### Remote/Exposed Mode
 
-```python
-HOST = '0.0.0.0'  # Remote access
-PORT = 8081
-DEBUG = False
+For remote access from other machines:
+
+```bash
+# Generate a strong token
+export DASHBOARD_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# Start in exposed mode
+python server.py --expose
 ```
 
-Default is local-only access:
+Access at `http://<server-ip>:8081`
 
-```python
-HOST = 'localhost'  # Local access only (default)
-PORT = 8081
-DEBUG = False
+**Required for exposed mode:**
+- `DASHBOARD_TOKEN` environment variable must be set
+- Process termination disabled by default (enable with `ALLOW_TERMINATE=true`)
+
+### Remote Mode with Termination
+
+```bash
+export DASHBOARD_TOKEN='your-secret-token'
+ALLOW_TERMINATE=true python server.py --expose
 ```
 
-Then access via `http://<server-ip>:8081` (remote) or `http://localhost:8081` (local)
-
-**Security Note:** Remote mode exposes the dashboard on all network interfaces. Use firewall rules or VPN for production deployments.
+**Warning:** Only enable process termination on trusted networks.
 
 ## Installation
 
@@ -70,9 +70,44 @@ python server.py
 ### Virtual Environment (Recommended for Linux)
 ```bash
 python3 -m venv venv
-source venv/bin/activate
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 python server.py
+```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DASHBOARD_TOKEN` | *(none)* | Authentication token (required for exposed mode) |
+| `EXPOSE` | `false` | Enable exposed mode |
+| `ALLOW_TERMINATE` | `true` (local)<br>`false` (exposed) | Enable process termination |
+| `HOST` | `127.0.0.1` | Host to bind to |
+| `PORT` | `8081` | Port to bind to |
+| `DEBUG` | `false` | Enable Flask debug mode |
+
+### Command Line Arguments
+
+```bash
+python server.py --help
+```
+
+Options:
+- `--host HOST`: Host to bind to (default: 127.0.0.1)
+- `--port PORT`: Port to bind to (default: 8081)
+- `--expose`: Enable exposed mode (bind to 0.0.0.0)
+- `--debug`: Enable debug mode
+
+### Configuration File
+
+Create `config.py` for persistent settings:
+
+```python
+HOST = 'localhost'
+PORT = 8081
+DEBUG = False
 ```
 
 ## Usage
@@ -88,53 +123,137 @@ python server.py
 - Click any connection row to view detailed process information
 - View CPU usage, memory, threads, start time, and executable path
 - Terminate processes with confirmation dialogs
-- Protected system processes (csrss.exe, lsass.exe, systemd, etc.) cannot be terminated
+- **Protected processes**: Critical system processes cannot be terminated
+- **Rate limiting**: Maximum 10 terminate requests per minute per IP
 - **Linux/macOS:** Requires sudo for process information and termination
 
 ### System Information
 - Hostname and IP address displayed under dashboard title
 - Useful for monitoring multiple machines in one browser session
 
-## Configuration
+### Authentication
 
-### Local vs Remote Access
+When `DASHBOARD_TOKEN` is set, all API requests must include:
 
-Edit `config.py` to switch between modes:
-
-**Local Only (Default):**
-```python
-HOST = 'localhost'
-PORT = 8081
-DEBUG = False
+```bash
+Authorization: Bearer your-token-here
 ```
 
-**Remote Access:**
-```python
-HOST = '0.0.0.0'
-PORT = 8081
-DEBUG = False
+Example with curl:
+
+```bash
+# Get connections
+curl -H "Authorization: Bearer $DASHBOARD_TOKEN" \
+     http://localhost:8081/api/connections
+
+# Terminate a process
+curl -X DELETE \
+     -H "Authorization: Bearer $DASHBOARD_TOKEN" \
+     http://localhost:8081/api/connection/8081/443
 ```
 
-### Change Port
+The web UI automatically prompts for the token and stores it in localStorage.
 
-Edit `config.py`:
-```python
-HOST = '0.0.0.0'
-PORT = 8888  # Your custom port
-DEBUG = False
+## API Reference
+
+All endpoints require authentication when `DASHBOARD_TOKEN` is set.
+
+### GET /api/config
+Returns dashboard configuration.
+
+**Response:**
+```json
+{
+  "auth_required": true,
+  "terminate_enabled": false
+}
 ```
 
-### Connection Limit
-Maximum 50 connections displayed. Modify in `server.py` line 97:
-```python
-connections = connections[:50]
+### GET /api/connections
+Returns network connections with pagination and filtering.
+
+**Parameters:**
+- `limit` (int, optional): Max results (default: 50, max: 500)
+- `offset` (int, optional): Starting offset (default: 0)
+- `state` (string, optional): Filter by state (e.g., "ESTABLISHED", "LISTEN")
+- `process` (string, optional): Filter by process name (substring match)
+
+**Response:**
+```json
+{
+  "connections": [...],
+  "total": 42,
+  "limit": 50,
+  "offset": 0
+}
 ```
 
-### Auto-refresh Interval
-Default 5 seconds. Change in `dashboard.html` line 682:
-```javascript
-refreshInterval = setInterval(refresh, 5000);
+**Examples:**
+```bash
+# Get first 100 connections
+curl "http://localhost:8081/api/connections?limit=100"
+
+# Get established connections only
+curl "http://localhost:8081/api/connections?state=ESTABLISHED"
+
+# Filter by process name
+curl "http://localhost:8081/api/connections?process=python"
 ```
+
+### GET /api/stats
+Returns connection statistics and top 10 processes.
+
+### GET /api/system
+Returns hostname and IP address.
+
+### GET /api/connection/\<local_port\>/\<remote_port\>
+Returns detailed connection and process information.
+
+### DELETE /api/connection/\<local_port\>/\<remote_port\>
+Terminates the process associated with a connection.
+
+**Requires:** `ALLOW_TERMINATE=true`
+
+**Rate Limit:** 10 requests per minute per IP
+
+**Protected:** Cannot terminate critical system processes or PID 1
+
+## Security Considerations
+
+### Safe by Default
+
+- **Local mode**: No authentication required, safe for localhost use
+- **Exposed mode**: Requires `DASHBOARD_TOKEN` to start
+- **Process termination**: Disabled by default in exposed mode
+
+### Critical Process Protection
+
+The following processes cannot be terminated:
+
+**Windows:**
+- System, csrss.exe, lsass.exe, services.exe, svchost.exe, winlogon.exe, smss.exe, dwm.exe, wininit.exe
+
+**Linux/Unix:**
+- systemd, init, launchd, kernel_task, sshd, dbus-daemon, NetworkManager, systemd-logind, systemd-udevd
+
+**Additional Protection:**
+- PID 1 cannot be terminated (init/systemd on Linux)
+
+### Rate Limiting
+
+- Terminate endpoint: 10 requests per minute per IP
+- Simple in-memory implementation (resets on server restart)
+
+### Best Practices for Production
+
+1. **Use strong tokens**: Generate with `secrets.token_urlsafe(32)`
+2. **Firewall rules**: Limit access to trusted IPs only
+3. **VPN or SSH tunnel**: Preferred for remote access
+4. **Reverse proxy**: Use nginx/caddy with HTTPS/TLS
+5. **Disable terminate**: Set `ALLOW_TERMINATE=false` for exposed instances
+6. **Monitor logs**: Review server output for unauthorized attempts
+
+See [SECURITY.md](SECURITY.md) for detailed security information.
 
 ## Platform-Specific Notes
 
@@ -151,60 +270,6 @@ refreshInterval = setInterval(refresh, 5000);
 - May require sudo for process operations
 - Uses shell script launcher (`start.sh`)
 
-## API Reference
-
-### GET /api/connections
-Returns active network connections (max 50).
-
-**Response:**
-```json
-[
-  {
-    "LocalPort": 8081,
-    "RemoteAddress": "95.42.20.232",
-    "RemotePort": 55810,
-    "State": "ESTABLISHED",
-    "ProcessName": "python3",
-    "ProcessId": 1491
-  }
-]
-```
-
-### GET /api/stats
-Returns connection statistics and top 10 processes.
-
-**Response:**
-```json
-{
-  "Stats": {
-    "Total": 44,
-    "Established": 12,
-    "Listening": 8,
-    "TimeWait": 2,
-    "CloseWait": 0
-  },
-  "TopProcesses": [...],
-  "Timestamp": "2025-12-28T16:54:23.123456"
-}
-```
-
-### GET /api/system
-Returns hostname and IP address.
-
-**Response:**
-```json
-{
-  "hostname": "UnuntuVM",
-  "ip": "10.0.0.4"
-}
-```
-
-### GET /api/connection/\<local_port\>/\<remote_port\>
-Returns detailed connection and process information.
-
-### DELETE /api/connection/\<local_port\>/\<remote_port\>
-Terminates the process associated with a connection.
-
 ## Requirements
 
 - Python 3.7+
@@ -212,20 +277,13 @@ Terminates the process associated with a connection.
 - Flask 2.3.0+
 - flask-cors 4.0.0+
 
-## Security Considerations
-
-- Protected system processes cannot be terminated
-- Confirmation dialogs prevent accidental termination
-- Remote access mode requires proper firewall configuration
-- No authentication implemented - use reverse proxy or VPN for production
-
 ## Troubleshooting
 
 ### Port Already in Use
-Change port in `server.py` or stop conflicting application.
+Change port: `python server.py --port 8082`
 
 ### No Process Information (Linux)
-Run with sudo: `sudo python3 server.py` or `sudo bash start_venv.sh`
+Run with sudo: `sudo python server.py`
 
 ### Permission Denied (Linux Scripts)
 Make executable: `chmod +x start.sh start_venv.sh`
@@ -233,6 +291,40 @@ Make executable: `chmod +x start.sh start_venv.sh`
 ### Debian/Ubuntu pip Error
 Use virtual environment launcher: `bash start_venv.sh`
 
+### Token Required Error
+Set token before starting in exposed mode:
+```bash
+export DASHBOARD_TOKEN='your-token'
+python server.py --expose
+```
+
+### 401 Unauthorized
+- Check token is set correctly
+- Token is stored in browser localStorage
+- Clear browser data and re-enter token
+
+## Development
+
+### Running Tests
+```bash
+# Import check
+python -c "import server; print('OK')"
+
+# Lint with ruff
+pip install ruff
+ruff check server.py
+```
+
+### GitHub Actions
+CI workflow runs automatically on push/PR:
+- Linting with ruff
+- Import checks
+- Basic validation
+
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License - see [LICENSE](LICENSE) file for details.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and security best practices.

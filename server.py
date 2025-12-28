@@ -1,22 +1,81 @@
-from flask import Flask, jsonify, send_file
+import os
+import sys
+import argparse
+import time
+from functools import wraps
+from collections import defaultdict
+from flask import Flask, jsonify, send_file, request
 from flask_cors import CORS
 import psutil
 import socket
 from datetime import datetime
 from collections import Counter
+
+# Configuration from environment variables and CLI args
+DASHBOARD_TOKEN = os.getenv('DASHBOARD_TOKEN', '')
+EXPOSE = os.getenv('EXPOSE', 'false').lower() in ('true', '1', 'yes')
+ALLOW_TERMINATE = os.getenv('ALLOW_TERMINATE', 'true').lower() in ('true', '1', 'yes')
+
 try:
     from config import HOST, PORT, DEBUG
 except ImportError:
-    HOST = 'localhost'
-    PORT = 8081
-    DEBUG = False
+    HOST = os.getenv('HOST', '127.0.0.1')
+    PORT = int(os.getenv('PORT', '8081'))
+    DEBUG = os.getenv('DEBUG', 'false').lower() in ('true', '1', 'yes')
 
 app = Flask(__name__)
 CORS(app)
 
-PROTECTED_NAMES = ['System', 'csrss.exe', 'lsass.exe', 'services.exe',
-                   'svchost.exe', 'winlogon.exe', 'smss.exe', 'dwm.exe',
-                   'systemd', 'init', 'launchd', 'kernel_task']
+# Critical process denylist - prevents termination of essential system processes
+CRITICAL_PROCESSES = [
+    # Windows
+    'System', 'csrss.exe', 'lsass.exe', 'services.exe', 'svchost.exe',
+    'winlogon.exe', 'smss.exe', 'dwm.exe', 'wininit.exe',
+    # Linux/Unix
+    'systemd', 'init', 'launchd', 'kernel_task', 'sshd', 'dbus-daemon',
+    'NetworkManager', 'systemd-logind', 'systemd-udevd'
+]
+
+# Rate limiting for terminate endpoint (simple in-memory implementation)
+class RateLimiter:
+    def __init__(self, max_requests=10, window=60):
+        self.max_requests = max_requests
+        self.window = window  # seconds
+        self.requests = defaultdict(list)
+
+    def is_allowed(self, ip):
+        now = time.time()
+        # Clean old entries
+        self.requests[ip] = [ts for ts in self.requests[ip] if now - ts < self.window]
+
+        if len(self.requests[ip]) >= self.max_requests:
+            return False
+
+        self.requests[ip].append(now)
+        return True
+
+terminate_limiter = RateLimiter(max_requests=10, window=60)
+
+def require_auth(f):
+    """Decorator to require token authentication when in exposed mode"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        # Skip auth if not in exposed mode and no token is set
+        if not EXPOSE and not DASHBOARD_TOKEN:
+            return f(*args, **kwargs)
+
+        # If token is set (local or exposed), enforce it
+        if DASHBOARD_TOKEN:
+            auth_header = request.headers.get('Authorization', '')
+            if not auth_header.startswith('Bearer '):
+                return jsonify({'error': 'Missing or invalid authorization header'}), 401
+
+            token = auth_header[7:]  # Remove 'Bearer ' prefix
+            if token != DASHBOARD_TOKEN:
+                return jsonify({'error': 'Invalid token'}), 401
+
+        return f(*args, **kwargs)
+    return decorated_function
 
 def is_localhost(ip):
     return ip.startswith('127.') or ip == '::1' or ip.startswith('::ffff:127.')
@@ -67,9 +126,26 @@ def get_process_details(pid):
 def index():
     return send_file('dashboard.html')
 
+@app.route('/api/config')
+def get_config():
+    """Return frontend configuration (auth status, terminate status)"""
+    return jsonify({
+        'auth_required': bool(DASHBOARD_TOKEN),
+        'terminate_enabled': ALLOW_TERMINATE
+    })
+
 @app.route('/api/connections')
+@require_auth
 def get_connections():
     try:
+        # Pagination parameters
+        limit = min(int(request.args.get('limit', 50)), 500)
+        offset = int(request.args.get('offset', 0))
+
+        # Filter parameters
+        state_filter = request.args.get('state', '').upper()
+        process_filter = request.args.get('process', '').lower()
+
         connections = []
         all_connections = psutil.net_connections(kind='inet')
 
@@ -90,6 +166,12 @@ def get_connections():
                         except (psutil.NoSuchProcess, psutil.AccessDenied):
                             pass
 
+                    # Apply filters
+                    if state_filter and conn.status != state_filter:
+                        continue
+                    if process_filter and process_filter not in process_name.lower():
+                        continue
+
                     connections.append({
                         'LocalPort': conn.laddr.port if conn.laddr else 0,
                         'RemoteAddress': conn.raddr.ip if conn.raddr else 'N/A',
@@ -101,12 +183,21 @@ def get_connections():
                 except Exception:
                     continue
 
-        connections = connections[:50]
-        return jsonify(connections)
+        # Apply pagination
+        total = len(connections)
+        paginated = connections[offset:offset + limit]
+
+        return jsonify({
+            'connections': paginated,
+            'total': total,
+            'limit': limit,
+            'offset': offset
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/system')
+@require_auth
 def get_system_info():
     try:
         hostname = socket.gethostname()
@@ -123,6 +214,7 @@ def get_system_info():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/stats')
+@require_auth
 def get_stats():
     try:
         all_connections = psutil.net_connections(kind='inet')
@@ -165,6 +257,7 @@ def get_stats():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/connection/<int:local_port>/<int:remote_port>')
+@require_auth
 def get_connection_details(local_port, remote_port):
     try:
         all_connections = psutil.net_connections(kind='inet')
@@ -194,7 +287,23 @@ def get_connection_details(local_port, remote_port):
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/connection/<int:local_port>/<int:remote_port>', methods=['DELETE'])
+@require_auth
 def kill_connection(local_port, remote_port):
+    # Check if terminate is allowed
+    if not ALLOW_TERMINATE:
+        return jsonify({
+            'success': False,
+            'message': 'Process termination is disabled. Set ALLOW_TERMINATE=true to enable.'
+        }), 403
+
+    # Rate limiting
+    client_ip = request.remote_addr
+    if not terminate_limiter.is_allowed(client_ip):
+        return jsonify({
+            'success': False,
+            'message': 'Rate limit exceeded. Maximum 10 terminate requests per minute.'
+        }), 429
+
     try:
         all_connections = psutil.net_connections(kind='inet')
 
@@ -213,10 +322,20 @@ def kill_connection(local_port, remote_port):
                     proc_name = proc.name()
                     proc_id = proc.pid
 
-                    if proc_name in PROTECTED_NAMES:
+                    # Prevent terminating PID 1 on Linux (init/systemd)
+                    if proc_id == 1:
                         return jsonify({
                             'success': False,
-                            'message': f'Cannot kill system process: {proc_name}',
+                            'message': 'Cannot terminate init process (PID 1)',
+                            'processName': proc_name,
+                            'processId': proc_id
+                        }), 403
+
+                    # Check critical process denylist
+                    if proc_name in CRITICAL_PROCESSES:
+                        return jsonify({
+                            'success': False,
+                            'message': f'Cannot terminate critical system process: {proc_name}',
                             'processName': proc_name,
                             'processId': proc_id
                         }), 403
@@ -266,26 +385,84 @@ def not_found(error):
 def internal_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
+def parse_args():
+    parser = argparse.ArgumentParser(description='Python Network Dashboard Server')
+    parser.add_argument('--host', default=HOST, help='Host to bind to (default: 127.0.0.1)')
+    parser.add_argument('--port', type=int, default=PORT, help='Port to bind to (default: 8081)')
+    parser.add_argument('--expose', action='store_true', help='Enable exposed mode (bind to 0.0.0.0)')
+    parser.add_argument('--debug', action='store_true', default=DEBUG, help='Enable debug mode')
+    return parser.parse_args()
+
+def validate_config(host, expose_flag):
+    """Validate configuration before starting server"""
+    global EXPOSE, ALLOW_TERMINATE
+
+    # Update EXPOSE based on CLI flag or host setting
+    if expose_flag or host == '0.0.0.0':
+        EXPOSE = True
+
+    # Check if binding to non-localhost
+    is_local = host in ('127.0.0.1', 'localhost', '::1')
+
+    if EXPOSE or not is_local:
+        if not DASHBOARD_TOKEN:
+            print("\n" + "=" * 60)
+            print("ERROR: Security violation!")
+            print("=" * 60)
+            print("Exposed mode requires DASHBOARD_TOKEN to be set.")
+            print("\nTo start in exposed mode:")
+            print("  export DASHBOARD_TOKEN='your-secret-token'")
+            print("  python server.py --expose")
+            print("\nOr for local-only mode:")
+            print("  python server.py")
+            print("=" * 60)
+            sys.exit(1)
+
+        # In exposed mode, default ALLOW_TERMINATE to false unless explicitly enabled
+        if os.getenv('ALLOW_TERMINATE') is None:
+            ALLOW_TERMINATE = False
+
 if __name__ == '__main__':
+    args = parse_args()
+
+    # Apply CLI overrides
+    host = args.host
+    port = args.port
+    debug = args.debug
+
+    # Validate configuration
+    validate_config(host, args.expose)
+
+    # Print startup banner
     print("=" * 60)
     print("Python Network Dashboard Server")
     print("=" * 60)
-    mode = "Remote" if HOST == '0.0.0.0' else "Local"
-    print(f"Mode: {mode} ({HOST}:{PORT})")
-    if HOST == '0.0.0.0':
-        print(f"Access: http://<server-ip>:{PORT}")
+    mode = "Exposed" if EXPOSE or host not in ('127.0.0.1', 'localhost') else "Local"
+    print(f"Mode: {mode}")
+    print(f"Bind: {host}:{port}")
+
+    if EXPOSE or host == '0.0.0.0':
+        print(f"Access: http://<server-ip>:{port}")
     else:
-        print(f"Access: http://localhost:{PORT}")
-    print("Press Ctrl+C to stop the server")
-    print("=" * 60)
+        print(f"Access: http://localhost:{port}")
+
+    print(f"Auth: {'Enabled' if DASHBOARD_TOKEN else 'Disabled'}")
+    print(f"Terminate: {'Enabled' if ALLOW_TERMINATE else 'Disabled'}")
+
+    if DASHBOARD_TOKEN:
+        print(f"\nAuthorization Header:")
+        print(f"  Authorization: Bearer {DASHBOARD_TOKEN}")
+
+    print("\nPress Ctrl+C to stop the server")
+    print("=" * 60 + "\n")
 
     try:
-        app.run(host=HOST, port=PORT, debug=DEBUG)
+        app.run(host=host, port=port, debug=debug)
     except KeyboardInterrupt:
         print("\nServer stopped")
     except OSError as e:
         if "address already in use" in str(e).lower():
-            print("\nError: Port 8081 is already in use.")
-            print("Please close the application using port 8081 or use a different port.")
+            print(f"\nError: Port {port} is already in use.")
+            print(f"Please close the application using port {port} or use a different port.")
         else:
             print(f"\nError: {e}")
