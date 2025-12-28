@@ -206,33 +206,70 @@ DEBUG = False
 
 ### Authentication
 
-When `DASHBOARD_TOKEN` is set, all API requests must include:
+When `DASHBOARD_TOKEN` is set, the web UI uses secure httpOnly cookies for authentication:
+
+1. **Login**: Enter your token when prompted - it's sent to `/api/login`
+2. **Cookie**: Server sets a secure, httpOnly cookie (protected from JavaScript/XSS)
+3. **Auto-auth**: Cookie is included automatically in all API requests
+4. **Logout**: Use `window.dashboardAuth.logout()` in browser console
+
+**For API access with curl (use login endpoint):**
 
 ```bash
-Authorization: Bearer your-token-here
+# Login and save cookies
+curl -c cookies.txt -X POST \
+     -H "Content-Type: application/json" \
+     -d '{"token":"your-token-here"}' \
+     http://localhost:8081/api/login
+
+# Make authenticated requests
+curl -b cookies.txt http://localhost:8081/api/connections
+
+# Logout
+curl -b cookies.txt -X POST http://localhost:8081/api/logout
 ```
 
-Example with curl:
-
+**Legacy Bearer token auth** (for backward compatibility):
 ```bash
-# Get connections
 curl -H "Authorization: Bearer $DASHBOARD_TOKEN" \
      http://localhost:8081/api/connections
-
-# Terminate a process
-curl -X DELETE \
-     -H "Authorization: Bearer $DASHBOARD_TOKEN" \
-     http://localhost:8081/api/connection/8081/443
 ```
-
-The web UI automatically prompts for the token and stores it in localStorage.
 
 ## API Reference
 
-All endpoints require authentication when `DASHBOARD_TOKEN` is set.
+All endpoints (except `/api/config` and `/api/login`) require authentication when `DASHBOARD_TOKEN` is set.
+
+### POST /api/login
+Authenticate and receive httpOnly cookie.
+
+**Request:**
+```json
+{
+  "token": "your-token-here"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "authenticated"
+}
+```
+
+Sets `auth_token` httpOnly cookie (24-hour expiration).
+
+### POST /api/logout
+Clear authentication cookie.
+
+**Response:**
+```json
+{
+  "status": "logged out"
+}
+```
 
 ### GET /api/config
-Returns dashboard configuration.
+Returns dashboard configuration (no auth required).
 
 **Response:**
 ```json
@@ -246,10 +283,10 @@ Returns dashboard configuration.
 Returns network connections with pagination and filtering.
 
 **Parameters:**
-- `limit` (int, optional): Max results (default: 50, max: 500)
-- `offset` (int, optional): Starting offset (default: 0)
-- `state` (string, optional): Filter by state (e.g., "ESTABLISHED", "LISTEN")
-- `process` (string, optional): Filter by process name (substring match)
+- `limit` (int, optional): Max results (default: 50, max: 500, validated)
+- `offset` (int, optional): Starting offset (default: 0, must be >= 0)
+- `state` (string, optional): Filter by state - must be valid TCP state (ESTABLISHED, LISTEN, TIME_WAIT, etc.)
+- `process` (string, optional): Filter by process name (max 100 chars, substring match)
 
 **Response:**
 ```json
@@ -291,6 +328,8 @@ Terminates the process associated with a connection.
 
 **Protected:** Cannot terminate critical system processes or PID 1
 
+**Logging:** All termination attempts are logged with IP address and process details
+
 ## Security Considerations
 
 ### Safe by Default
@@ -298,6 +337,38 @@ Terminates the process associated with a connection.
 - **Local mode**: No authentication required, safe for localhost use
 - **Exposed mode**: Requires `DASHBOARD_TOKEN` to start
 - **Process termination**: Disabled by default in exposed mode
+
+### Security Hardening Features
+
+#### 1. **httpOnly Cookie Authentication (XSS Protection)**
+- Tokens stored in httpOnly cookies (inaccessible to JavaScript)
+- Prevents XSS attacks from stealing authentication tokens
+- Secure flag enabled when using HTTPS
+- SameSite=Strict to prevent CSRF attacks
+- 24-hour cookie expiration
+
+#### 2. **Input Validation**
+- All query parameters validated and sanitized
+- Limit capped at 500, offset must be >= 0
+- State filters validated against known TCP states
+- Process filter limited to 100 characters
+- Invalid inputs return 400 Bad Request with error message
+
+#### 3. **CORS Protection**
+- Whitelist-only origins: `http://localhost:8081` and `http://127.0.0.1:8081`
+- Credentials support enabled for cookie-based auth
+- Prevents unauthorized cross-origin requests
+
+#### 4. **Comprehensive Logging**
+- Authentication attempts (success and failure) logged with IP
+- Process termination requests logged with full details
+- Rate limit violations logged
+- Helps detect and investigate unauthorized access
+
+#### 5. **Docker Security**
+- Runs as non-root user (UID 1000)
+- Minimal attack surface with slim Python image
+- Health checks for container monitoring
 
 ### Critical Process Protection
 
@@ -320,13 +391,25 @@ The following processes cannot be terminated:
 ### Best Practices for Production
 
 1. **Use strong tokens**: Generate with `secrets.token_urlsafe(32)`
-2. **Firewall rules**: Limit access to trusted IPs only
-3. **VPN or SSH tunnel**: Preferred for remote access
-4. **Reverse proxy**: Use nginx/caddy with HTTPS/TLS
+2. **Enable HTTPS**: Use reverse proxy (nginx/caddy) with TLS certificates
+3. **Firewall rules**: Limit access to trusted IPs only
+4. **VPN or SSH tunnel**: Preferred for remote access over public internet
 5. **Disable terminate**: Set `ALLOW_TERMINATE=false` for exposed instances
 6. **Monitor logs**: Review server output for unauthorized attempts
+7. **Regular updates**: Keep dependencies updated (`pip install -U -r requirements.txt`)
+8. **Docker deployment**: Use containerized deployment for isolation
 
-See [SECURITY.md](SECURITY.md) for detailed security information.
+### Process Termination Risks
+
+⚠️ **Warning:** Process termination can disrupt system stability. Only use this feature when:
+- You understand which process you're terminating
+- You're on a development/testing machine
+- You've verified it's not a critical system service
+- You have proper backups and can recover from issues
+
+**Never terminate processes in production without understanding the impact!**
+
+See [SECURITY.md](SECURITY.md) for detailed security information and vulnerability reporting.
 
 ## Platform-Specific Notes
 
@@ -373,8 +456,9 @@ python server.py --expose
 
 ### 401 Unauthorized
 - Check token is set correctly
-- Token is stored in browser localStorage
-- Clear browser data and re-enter token
+- Ensure cookies are enabled in your browser
+- Try logging out and logging in again: `window.dashboardAuth.logout()`
+- Clear browser cookies and re-enter token
 
 ---
 
@@ -406,19 +490,30 @@ For production Docker deployments, SSL certificates, and advanced configurations
 
 ### Running Tests
 ```bash
-# Import check
-python -c "import server; print('OK')"
+# Install test dependencies
+pip install pytest bandit
+
+# Run pytest tests
+pytest test_server.py -v
+
+# Run security scan
+bandit -r server.py
 
 # Lint with ruff
 pip install ruff
 ruff check server.py
+
+# Import check
+python -c "import server; print('OK')"
 ```
 
 ### GitHub Actions
 CI workflow runs automatically on push/PR:
 - Linting with ruff
 - Import checks
-- Basic validation
+- Unit tests with pytest
+- Security scanning with Bandit
+- Generates security report artifact
 
 ## License
 

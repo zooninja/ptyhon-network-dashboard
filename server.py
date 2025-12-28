@@ -2,14 +2,22 @@ import os
 import sys
 import argparse
 import time
+import logging
 from functools import wraps
 from collections import defaultdict
-from flask import Flask, jsonify, send_file, request
+from flask import Flask, jsonify, send_file, request, make_response
 from flask_cors import CORS
 import psutil
 import socket
 from datetime import datetime
 from collections import Counter
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configuration from environment variables and CLI args
 DASHBOARD_TOKEN = os.getenv('DASHBOARD_TOKEN', '')
@@ -24,7 +32,9 @@ except ImportError:
     DEBUG = os.getenv('DEBUG', 'false').lower() in ('true', '1', 'yes')
 
 app = Flask(__name__)
-CORS(app)
+CORS(app,
+     origins=['http://localhost:8081', 'http://127.0.0.1:8081'],
+     supports_credentials=True)
 
 # Critical process denylist - prevents termination of essential system processes
 CRITICAL_PROCESSES = [
@@ -57,7 +67,7 @@ class RateLimiter:
 terminate_limiter = RateLimiter(max_requests=10, window=60)
 
 def require_auth(f):
-    """Decorator to require token authentication when in exposed mode"""
+    """Decorator to require token authentication via httpOnly cookie"""
     @wraps(f)
     def decorated_function(*args, **kwargs):
         # Skip auth if not in exposed mode and no token is set
@@ -66,13 +76,18 @@ def require_auth(f):
 
         # If token is set (local or exposed), enforce it
         if DASHBOARD_TOKEN:
-            auth_header = request.headers.get('Authorization', '')
-            if not auth_header.startswith('Bearer '):
-                return jsonify({'error': 'Missing or invalid authorization header'}), 401
+            # Check cookie first (preferred method)
+            token = request.cookies.get('auth_token')
 
-            token = auth_header[7:]  # Remove 'Bearer ' prefix
-            if token != DASHBOARD_TOKEN:
-                return jsonify({'error': 'Invalid token'}), 401
+            # Fallback to Authorization header for backward compatibility
+            if not token:
+                auth_header = request.headers.get('Authorization', '')
+                if auth_header.startswith('Bearer '):
+                    token = auth_header[7:]  # Remove 'Bearer ' prefix
+
+            if not token or token != DASHBOARD_TOKEN:
+                logger.warning(f"Failed authentication attempt from {request.remote_addr}")
+                return jsonify({'error': 'Unauthorized'}), 401
 
         return f(*args, **kwargs)
     return decorated_function
@@ -134,17 +149,66 @@ def get_config():
         'terminate_enabled': ALLOW_TERMINATE
     })
 
+@app.route('/api/login', methods=['POST'])
+def login():
+    """Login endpoint that sets httpOnly cookie"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Invalid request'}), 400
+
+        token = data.get('token', '').strip()
+        if not token:
+            return jsonify({'error': 'Token required'}), 400
+
+        if token == DASHBOARD_TOKEN:
+            logger.info(f"Successful login from {request.remote_addr}")
+            resp = make_response(jsonify({'status': 'authenticated'}))
+            resp.set_cookie(
+                'auth_token',
+                token,
+                httponly=True,
+                secure=request.is_secure,  # Only set secure flag if HTTPS
+                samesite='Strict',
+                max_age=86400  # 24 hours
+            )
+            return resp
+        else:
+            logger.warning(f"Failed login attempt from {request.remote_addr}")
+            return jsonify({'error': 'Invalid token'}), 401
+
+    except Exception as e:
+        logger.error(f"Login error: {e}")
+        return jsonify({'error': 'Login failed'}), 500
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    """Logout endpoint that clears the cookie"""
+    logger.info(f"Logout from {request.remote_addr}")
+    resp = make_response(jsonify({'status': 'logged out'}))
+    resp.set_cookie('auth_token', '', expires=0)
+    return resp
+
 @app.route('/api/connections')
 @require_auth
 def get_connections():
     try:
-        # Pagination parameters
-        limit = min(int(request.args.get('limit', 50)), 500)
-        offset = int(request.args.get('offset', 0))
+        # Validate and sanitize pagination parameters
+        try:
+            limit = min(int(request.args.get('limit', 50)), 500)
+            if limit < 1:
+                limit = 50
+            offset = max(int(request.args.get('offset', 0)), 0)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid limit or offset parameter'}), 400
 
-        # Filter parameters
-        state_filter = request.args.get('state', '').upper()
-        process_filter = request.args.get('process', '').lower()
+        # Validate and sanitize filter parameters
+        state_filter = request.args.get('state', '').strip().upper()
+        valid_states = ['ESTABLISHED', 'LISTEN', 'TIME_WAIT', 'CLOSE_WAIT', 'SYN_SENT', 'SYN_RECV', 'FIN_WAIT1', 'FIN_WAIT2', 'CLOSING', 'LAST_ACK', 'CLOSE']
+        if state_filter and state_filter not in valid_states:
+            return jsonify({'error': f'Invalid state filter. Valid values: {", ".join(valid_states)}'}), 400
+
+        process_filter = request.args.get('process', '').strip()[:100]  # Max 100 chars
 
         connections = []
         all_connections = psutil.net_connections(kind='inet')
@@ -289,8 +353,11 @@ def get_connection_details(local_port, remote_port):
 @app.route('/api/connection/<int:local_port>/<int:remote_port>', methods=['DELETE'])
 @require_auth
 def kill_connection(local_port, remote_port):
+    logger.warning(f"Process termination requested for connection {local_port}:{remote_port} from {request.remote_addr}")
+
     # Check if terminate is allowed
     if not ALLOW_TERMINATE:
+        logger.warning(f"Termination denied - feature disabled")
         return jsonify({
             'success': False,
             'message': 'Process termination is disabled. Set ALLOW_TERMINATE=true to enable.'
@@ -299,6 +366,7 @@ def kill_connection(local_port, remote_port):
     # Rate limiting
     client_ip = request.remote_addr
     if not terminate_limiter.is_allowed(client_ip):
+        logger.warning(f"Rate limit exceeded for {client_ip}")
         return jsonify({
             'success': False,
             'message': 'Rate limit exceeded. Maximum 10 terminate requests per minute.'
@@ -347,6 +415,7 @@ def kill_connection(local_port, remote_port):
                     except psutil.TimeoutExpired:
                         proc.kill()
 
+                    logger.info(f"Successfully terminated process {proc_name} (PID {proc_id}) from {request.remote_addr}")
                     return jsonify({
                         'success': True,
                         'message': 'Process terminated successfully',

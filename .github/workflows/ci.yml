@@ -11,18 +11,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.9'
+        python-version: '3.12'
 
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        pip install ruff
+        pip install ruff pytest bandit
 
     - name: Lint with ruff
       run: |
@@ -35,3 +35,35 @@ jobs:
     - name: Check critical process list
       run: |
         python -c "from server import CRITICAL_PROCESSES; assert len(CRITICAL_PROCESSES) > 0; print(f'Critical processes: {len(CRITICAL_PROCESSES)}')"
+
+    - name: Run tests
+      run: |
+        pytest test_server.py -v
+
+  security:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Bandit
+      run: |
+        python -m pip install --upgrade pip
+        pip install bandit[toml]
+
+    - name: Run Bandit security scan
+      run: |
+        bandit -r server.py -f json -o bandit-report.json || true
+        bandit -r server.py -f screen
+
+    - name: Upload Bandit report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: bandit-security-report
+        path: bandit-report.json

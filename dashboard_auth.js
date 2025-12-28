@@ -1,50 +1,105 @@
 // Authentication module for Python Network Dashboard
-// This script handles token-based authentication for API requests
+// This script handles cookie-based authentication for API requests
 
 (function() {
     'use strict';
 
     // Global auth state
-    let authToken = localStorage.getItem('dashboard_token') || '';
     let authRequired = false;
     let terminateEnabled = true;
+    let isAuthenticated = false;
 
     // Fetch configuration on startup
     async function fetchConfig() {
         try {
-            const response = await fetch('/api/config');
+            const response = await fetch('/api/config', {
+                credentials: 'include'  // Include cookies
+            });
             const config = await response.json();
             authRequired = config.auth_required;
             terminateEnabled = config.terminate_enabled;
 
-            if (authRequired && !authToken) {
-                showTokenPrompt();
+            if (authRequired && !isAuthenticated) {
+                await checkAuth();
             }
         } catch (error) {
             console.error('Failed to fetch config:', error);
         }
     }
 
-    // Show token input modal
-    function showTokenPrompt() {
-        const token = prompt('Enter Dashboard Token:\n(Required for API access)');
-        if (token) {
-            authToken = token;
-            localStorage.setItem('dashboard_token', token);
-            location.reload();
+    // Check if already authenticated via cookie
+    async function checkAuth() {
+        try {
+            const response = await fetch('/api/system', {
+                credentials: 'include'
+            });
+            if (response.ok) {
+                isAuthenticated = true;
+            } else if (response.status === 401) {
+                showTokenPrompt();
+            }
+        } catch (error) {
+            showTokenPrompt();
         }
     }
 
-    // Enhanced fetch with auth header
+    // Show token input modal and login
+    async function showTokenPrompt() {
+        const token = prompt('Enter Dashboard Token:\n(Required for API access)');
+        if (token) {
+            await loginWithToken(token);
+        }
+    }
+
+    // Login with token and set httpOnly cookie
+    async function loginWithToken(token) {
+        try {
+            const response = await fetch('/api/login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                credentials: 'include',  // Include cookies
+                body: JSON.stringify({ token: token })
+            });
+
+            if (response.ok) {
+                isAuthenticated = true;
+                location.reload();
+            } else {
+                const data = await response.json();
+                alert('Authentication failed: ' + (data.error || 'Invalid token'));
+                showTokenPrompt();
+            }
+        } catch (error) {
+            console.error('Login error:', error);
+            alert('Login failed. Please try again.');
+        }
+    }
+
+    // Logout and clear cookie
+    async function logout() {
+        try {
+            await fetch('/api/logout', {
+                method: 'POST',
+                credentials: 'include'
+            });
+            isAuthenticated = false;
+            location.reload();
+        } catch (error) {
+            console.error('Logout error:', error);
+        }
+    }
+
+    // Enhanced fetch with credentials (includes httpOnly cookies automatically)
     const originalFetch = window.fetch;
     window.fetch = function(url, options = {}) {
-        if (authToken && url.startsWith('/api/')) {
-            options.headers = options.headers || {};
-            options.headers['Authorization'] = `Bearer ${authToken}`;
+        if (url.startsWith('/api/')) {
+            options.credentials = 'include';  // Always include cookies for API calls
         }
         return originalFetch(url, options).then(response => {
             if (response.status === 401) {
-                localStorage.removeItem('dashboard_token');
+                isAuthenticated = false;
                 showTokenPrompt();
                 throw new Error('Authentication required');
             }
@@ -56,11 +111,8 @@
     window.dashboardAuth = {
         isAuthRequired: () => authRequired,
         isTerminateEnabled: () => terminateEnabled,
-        clearToken: () => {
-            localStorage.removeItem('dashboard_token');
-            authToken = '';
-            location.reload();
-        },
+        isAuthenticated: () => isAuthenticated,
+        logout: logout,
         updateToken: () => {
             showTokenPrompt();
         }
