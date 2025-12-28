@@ -432,6 +432,7 @@ See [SECURITY.md](SECURITY.md) for detailed security information and vulnerabili
 - Requires sudo for process details and termination
 - Debian 12+/Ubuntu 23.04+ need virtual environment
 - Uses shell script launchers (`start.sh`, `start_venv.sh`)
+- **Azure VMs:** See [AZURE.md](AZURE.md) for SSH tunneling and systemd setup
 
 ### macOS
 - May require sudo for process operations
