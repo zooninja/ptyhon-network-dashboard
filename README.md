@@ -26,6 +26,12 @@ start.bat
 ./start.sh
 ```
 
+**Linux (Debian 12+/Ubuntu 23.04+):**
+```bash
+chmod +x start_venv.sh
+./start_venv.sh
+```
+
 Open browser to `http://localhost:8081`
 
 ## Installation
