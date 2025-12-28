@@ -20,72 +20,131 @@ Real-time web-based network monitoring dashboard with process management capabil
 ![Process Termination](https://github.com/zooninja/python-network-dashboard/raw/main/screenshots/process-termination.png)
 *Safely terminate processes with detailed confirmation dialogs and warnings*
 
-## Features
-
-- Real-time network connection monitoring with 5-second auto-refresh
-- Interactive filtering by connection state and process name
-- Process termination with safety confirmations and rate limiting
-- System hostname and IP display for multi-machine monitoring
-- **Safe-by-default**: Local-only mode requires no authentication
-- **Token-based authentication**: Required for network-exposed deployments
-- **Critical process protection**: Prevents termination of essential system processes
-- Dark naval theme with smooth animations
-- Cross-platform support (Windows, Linux, macOS)
-
 ## Quick Start
 
-### Local Mode (Recommended)
+### The Easiest Way
+
+**Windows:**
+```bash
+start.bat
+```
+
+**Linux/macOS:**
+```bash
+./start.sh
+```
+
+Then open your browser to **http://localhost:8081** - that's it!
+
+The start scripts automatically:
+- Create a virtual environment if needed
+- Install all dependencies
+- Launch the dashboard
+
+### Manual Start (If you prefer)
 
 ```bash
 python server.py
 ```
 
-Access at `http://localhost:8081`
+Access at `http://localhost:8081` - no authentication required for local use.
 
-- No authentication required
-- Bind to `127.0.0.1` (localhost only)
-- Process termination enabled by default
+---
 
-### Remote/Exposed Mode
+## Features
 
-For remote access from other machines:
+- 🔄 Real-time network connection monitoring (auto-refresh every 5s)
+- 🔍 Filter by connection state (ESTABLISHED, LISTENING, etc.) and process
+- ⚡ Terminate processes with safety confirmations
+- 🔒 Safe-by-default: localhost-only mode needs no authentication
+- 🌐 Remote access mode with token authentication
+- 🛡️ Critical process protection (can't terminate system processes)
+- 🎨 Modern dark theme with smooth animations
+- 💻 Cross-platform (Windows, Linux, macOS)
 
+---
+
+## Advanced Usage
+
+### Remote Access (Access from other computers)
+
+When you need to access the dashboard from another machine on your network:
+
+**1. Generate a secure token:**
 ```bash
-# Generate a strong token
+# Linux/macOS
 export DASHBOARD_TOKEN=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
 
-# Start in exposed mode
+# Windows PowerShell
+$env:DASHBOARD_TOKEN = python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+**2. Start in exposed mode:**
+```bash
 python server.py --expose
 ```
 
-Access at `http://<server-ip>:8081`
-
-**Required for exposed mode:**
-- `DASHBOARD_TOKEN` environment variable must be set
-- Process termination disabled by default (enable with `ALLOW_TERMINATE=true`)
-
-### Remote Mode with Termination
-
-```bash
-export DASHBOARD_TOKEN='your-secret-token'
-ALLOW_TERMINATE=true python server.py --expose
+**3. Access from any device on your network:**
+```
+http://<your-server-ip>:8081
 ```
 
-**Warning:** Only enable process termination on trusted networks.
+You'll be prompted for the token when you open the dashboard.
 
-## Installation
+### Enable Process Termination in Remote Mode
 
-### Standard Installation
+By default, remote mode disables process termination for safety. To enable it:
+
+```bash
+# Linux/macOS
+export DASHBOARD_TOKEN='your-secret-token'
+export ALLOW_TERMINATE=true
+python server.py --expose
+
+# Windows PowerShell
+$env:DASHBOARD_TOKEN='your-secret-token'
+$env:ALLOW_TERMINATE='true'
+python server.py --expose
+```
+
+⚠️ **Warning:** Only enable on trusted networks!
+
+---
+
+## Installation Details
+
+### Requirements
+- Python 3.7 or higher
+- Dependencies listed in `requirements.txt`
+
+### First-Time Setup
+
+The start scripts (`start.bat` or `start.sh`) handle everything automatically, but if you want to set up manually:
+
+**1. Install dependencies:**
 ```bash
 pip install -r requirements.txt
+```
+
+**2. Run the server:**
+```bash
 python server.py
 ```
 
-### Virtual Environment (Recommended for Linux)
+### Using a Virtual Environment (Optional)
+
 ```bash
+# Create virtual environment
 python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Activate it
+source venv/bin/activate  # Linux/macOS
+venv\Scripts\activate     # Windows
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Run server
 python server.py
 ```
 
@@ -316,6 +375,32 @@ python server.py --expose
 - Check token is set correctly
 - Token is stored in browser localStorage
 - Clear browser data and re-enter token
+
+---
+
+## Docker Deployment (Advanced)
+
+For containerized deployments, Docker support is available. See [DOCKER.md](DOCKER.md) for comprehensive documentation.
+
+### Quick Docker Start
+
+**Local mode:**
+```bash
+docker-compose --profile local up -d
+```
+Access at `http://localhost:8081` (token: `local-docker-no-auth`)
+
+**⚠️ Note:** Docker on Windows/Mac cannot access host network connections due to virtualization. For full functionality, use the native Python installation (`start.bat` or `start.sh`).
+
+### Docker Profiles
+
+- `local` - Localhost access, port 8081 bound to 127.0.0.1
+- `exposed` - Network access (requires `DASHBOARD_TOKEN` environment variable)
+- `production` - HTTPS with nginx reverse proxy
+
+For production Docker deployments, SSL certificates, and advanced configurations, see [DOCKER.md](DOCKER.md).
+
+---
 
 ## Development
 
