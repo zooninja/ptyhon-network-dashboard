@@ -203,7 +203,7 @@ def get_system_info():
         hostname = socket.gethostname()
         try:
             ip_address = socket.gethostbyname(hostname)
-        except:
+        except OSError:
             ip_address = '127.0.0.1'
 
         return jsonify({
@@ -349,7 +349,7 @@ def kill_connection(local_port, remote_port):
 
                     return jsonify({
                         'success': True,
-                        'message': f'Process terminated successfully',
+                        'message': 'Process terminated successfully',
                         'processName': proc_name,
                         'processId': proc_id
                     })
@@ -450,7 +450,7 @@ if __name__ == '__main__':
     print(f"Terminate: {'Enabled' if ALLOW_TERMINATE else 'Disabled'}")
 
     if DASHBOARD_TOKEN:
-        print(f"\nAuthorization Header:")
+        print("\nAuthorization Header:")
         print(f"  Authorization: Bearer {DASHBOARD_TOKEN}")
 
     print("\nPress Ctrl+C to stop the server")
