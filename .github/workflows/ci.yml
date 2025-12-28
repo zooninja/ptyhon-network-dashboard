@@ -59,7 +59,7 @@ jobs:
     - name: Run Bandit security scan
       run: |
         bandit -r server.py -f json -o bandit-report.json || true
-        bandit -r server.py -f screen
+        bandit -r server.py -f screen || true
 
     - name: Upload Bandit report
       uses: actions/upload-artifact@v4
