@@ -15,6 +15,6 @@ pip install -q -r requirements.txt
 
 echo "Starting server..."
 echo "Note: Requires sudo for process information and termination"
-sudo python3 server.py
+sudo "$VENV_DIR/bin/python3" server.py
 
 deactivate
