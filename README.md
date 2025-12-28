@@ -41,6 +41,17 @@ The start scripts automatically:
 - Install all dependencies
 - Launch the dashboard
 
+### Auto-Start on Windows Login
+
+Want the dashboard to start automatically with admin rights when you log in?
+
+**Simple Setup:**
+1. Right-click `setup_startup.bat`
+2. Select "Run as administrator"
+3. Done!
+
+See [STARTUP.md](STARTUP.md) for complete auto-start documentation.
+
 ### Manual Start (If you prefer)
 
 ```bash
