@@ -77,6 +77,31 @@ Access at `http://localhost:8081` - no authentication required for local use.
 
 ## Advanced Usage
 
+### Remote Server Monitoring (SSH Tunneling)
+
+Monitor servers with restricted firewall access (cloud VMs, corporate servers, etc.) using SSH port forwarding:
+
+```bash
+# On remote server: start dashboard
+./start.sh
+
+# On your local machine: create SSH tunnel
+ssh -L 8081:localhost:8081 user@remote-server.com
+
+# Access in browser
+http://localhost:8081
+```
+
+**Monitor multiple servers simultaneously:**
+Map each server to a different local port and access them all in separate browser tabs.
+
+See [REMOTE_ACCESS.md](REMOTE_ACCESS.md) for complete guide including:
+- SSH tunneling setup and troubleshooting
+- Monitoring multiple remote machines
+- Cloud platform examples (Azure, AWS, GCP)
+- Helper scripts for easy connection
+- Security best practices
+
 ### Remote Access (Access from other computers)
 
 When you need to access the dashboard from another machine on your network:
@@ -432,7 +457,8 @@ See [SECURITY.md](SECURITY.md) for detailed security information and vulnerabili
 - Requires sudo for process details and termination
 - Debian 12+/Ubuntu 23.04+ need virtual environment
 - Uses shell script launchers (`start.sh`, `start_venv.sh`)
-- **Azure VMs:** See [AZURE.md](AZURE.md) for SSH tunneling and systemd setup
+- **Remote Servers:** See [SSH-TUNNELING.md](SSH-TUNNELING.md) for monitoring servers with restricted firewall access
+- **Azure/Cloud VMs:** See [AZURE.md](AZURE.md) for cloud-specific deployment and systemd auto-start
 
 ### macOS
 - May require sudo for process operations
