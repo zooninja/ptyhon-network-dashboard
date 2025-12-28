@@ -357,7 +357,7 @@ def kill_connection(local_port, remote_port):
 
     # Check if terminate is allowed
     if not ALLOW_TERMINATE:
-        logger.warning(f"Termination denied - feature disabled")
+        logger.warning("Termination denied - feature disabled")
         return jsonify({
             'success': False,
             'message': 'Process termination is disabled. Set ALLOW_TERMINATE=true to enable.'
